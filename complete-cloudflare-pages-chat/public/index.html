@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>跨端聊天室</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3B82F6',
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .scrollbar-hide { scrollbar-width: none; }
+            .scrollbar-hide::-webkit-scrollbar { display: none; }
+            .message-in { animation: fadeInLeft 0.3s; }
+            .message-out { animation: fadeInRight 0.3s; }
+        }
+        @keyframes fadeInLeft {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes fadeInRight {
+            from { opacity: 0; transform: translateX(10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen flex flex-col overflow-hidden">
+    <!-- 登录界面 -->
+    <div id="login" class="flex-1 flex items-center justify-center p-4">
+        <div class="w-full max-w-md bg-white rounded-xl shadow-lg p-6">
+            <h1 class="text-2xl font-bold text-center text-primary mb-6">聊天室</h1>
+            <input type="text" id="nickname" placeholder="请输入昵称" 
+                class="w-full px-4 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/50 mb-4">
+            <button id="enterBtn" class="w-full bg-primary text-white py-2 rounded-lg hover:bg-primary/90">进入聊天室</button>
+        </div>
+    </div>
+
+    <!-- 聊天界面 -->
+    <div id="chat" class="flex flex-col h-full hidden">
+        <!-- 顶部栏 -->
+        <div class="bg-white border-b p-3 flex justify-between items-center">
+            <h2 class="font-bold text-primary">聊天室</h2>
+            <div class="flex items-center">
+                <span id="onlineCount" class="text-sm text-gray-600 mr-3"><i class="fa fa-users"></i> 0人在线</span>
+                <button id="logoutBtn" class="text-gray-500 hover:text-red-500"><i class="fa fa-sign-out"></i></button>
+            </div>
+        </div>
+
+        <!-- 消息区 -->
+        <div id="messages" class="flex-1 p-4 overflow-y-auto scrollbar-hide bg-gray-50"></div>
+
+        <!-- 输入区 -->
+        <div class="p-3 bg-white border-t">
+            <div class="flex">
+                <textarea id="msgInput" placeholder="输入消息..." 
+                    class="flex-1 px-3 py-2 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+                    rows="1"></textarea>
+                <button id="sendBtn" class="ml-2 bg-primary text-white p-2 rounded-lg hover:bg-primary/90">
+                    <i class="fa fa-paper-plane"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 状态管理
+        const state = {
+            user: null,
+            ws: null
+        };
+
+        // DOM元素
+        const loginEl = document.getElementById('login');
+        const chatEl = document.getElementById('chat');
+        const nicknameEl = document.getElementById('nickname');
+        const enterBtn = document.getElementById('enterBtn');
+        const logoutBtn = document.getElementById('logoutBtn');
+        const messagesEl = document.getElementById('messages');
+        const msgInputEl = document.getElementById('msgInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const onlineCountEl = document.getElementById('onlineCount');
+
+        // 初始化事件
+        function init() {
+            enterBtn.addEventListener('click', handleLogin);
+            nicknameEl.addEventListener('keypress', e => e.key === 'Enter' && handleLogin());
+            logoutBtn.addEventListener('click', handleLogout);
+            sendBtn.addEventListener('click', sendMessage);
+            msgInputEl.addEventListener('keypress', e => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+            // 自动调整输入框高度
+            msgInputEl.addEventListener('input', () => {
+                msgInputEl.style.height = 'auto';
+                msgInputEl.style.height = Math.min(msgInputEl.scrollHeight, 100) + 'px';
+            });
+        }
+
+        // 登录处理
+        function handleLogin() {
+            const nickname = nicknameEl.value.trim();
+            if (!nickname) return alert('请输入昵称');
+            
+            state.user = {
+                id: Date.now().toString(36),
+                name: nickname
+            };
+
+            // 连接WebSocket（对接Cloudflare Pages Functions）
+            connectWebSocket();
+
+            // 切换界面
+            loginEl.classList.add('hidden');
+            chatEl.classList.remove('hidden');
+            msgInputEl.focus();
+        }
+
+        // 连接WebSocket
+        function connectWebSocket() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${location.host}/api/chat`;
+            state.ws = new WebSocket(wsUrl);
+
+            // 连接成功
+            state.ws.onopen = () => {
+                console.log('WebSocket连接成功');
+                // 发送登录消息
+                state.ws.send(JSON.stringify({
+                    type: 'login',
+                    user: state.user
+                }));
+            };
+
+            // 接收消息
+            state.ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                switch (data.type) {
+                    case 'online':
+                        onlineCountEl.innerHTML = `<i class="fa fa-users"></i> ${data.count}人在线`;
+                        break;
+                    case 'message':
+                        addMessageToUI(data.msg);
+                        break;
+                }
+            };
+
+            // 断开重连
+            state.ws.onclose = () => {
+                console.log('连接断开，正在重连...');
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        // 发送消息
+        function sendMessage() {
+            const content = msgInputEl.value.trim();
+            if (!content || !state.ws) return;
+
+            const message = {
+                id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
+                content,
+                user: state.user,
+                time: new Date().toISOString()
+            };
+
+            // 发送到服务器
+            state.ws.send(JSON.stringify({
+                type: 'message',
+                msg: message
+            }));
+
+            // 清空输入框
+            msgInputEl.value = '';
+            msgInputEl.style.height = 'auto';
+        }
+
+        // 添加消息到界面
+        function addMessageToUI(msg) {
+            const isOwn = msg.user.id === state.user.id;
+            const msgEl = document.createElement('div');
+            msgEl.className = `mb-3 ${isOwn ? 'flex justify-end' : 'flex'}`;
+            
+            const time = new Date(msg.time);
+            const timeStr = `${time.getHours().toString().padStart(2, '0')}:${time.getMinutes().toString().padStart(2, '0')}`;
+
+            if (isOwn) {
+                msgEl.innerHTML = `
+                    <div class="max-w-[80%]">
+                        <div class="bg-primary text-white p-3 rounded-lg rounded-tr-none shadow-sm message-out">
+                            ${msg.content}
+                        </div>
+                        <div class="text-xs text-gray-500 mt-1 text-right">${timeStr}</div>
+                    </div>
+                `;
+            } else {
+                msgEl.innerHTML = `
+                    <div class="max-w-[80%]">
+                        <div class="text-xs text-gray-500">${msg.user.name}</div>
+                        <div class="bg-white p-3 rounded-lg rounded-tl-none shadow-sm message-in">
+                            ${msg.content}
+                        </div>
+                        <div class="text-xs text-gray-500 mt-1">${timeStr}</div>
+                    </div>
+                `;
+            }
+
+            messagesEl.appendChild(msgEl);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        // 登出处理
+        function handleLogout() {
+            if (state.ws) {
+                state.ws.send(JSON.stringify({
+                    type: 'logout',
+                    userId: state.user.id
+                }));
+                state.ws.close();
+            }
+            state.user = null;
+            chatEl.classList.add('hidden');
+            loginEl.classList.remove('hidden');
+            nicknameEl.value = '';
+        }
+
+        // 初始化应用
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
+    
